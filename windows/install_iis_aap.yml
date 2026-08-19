@@ -3,8 +3,8 @@
   hosts: "{{ _hosts }}"
   vars:
     iis_message: "Test web content"
-    site_name: "demo.sdunne.net"
-    site_path: 'C:\inetpub\demo.sdunne.net'
+    site_name: "test19.dac.nc.gov"
+    site_path: 'C:\Site\test19.dac.nc.gov'
     cert_type: "selfsigned"
 
   tasks:
@@ -66,7 +66,7 @@
     - name: Convert PEM certificates to PFX
       delegate_to: localhost
       community.crypto.openssl_pkcs12:
-        path: /tmp/demo.sdunne.net.pfx
+        path: /tmp/demo.test19.dac.nc.gov.pfx
         certificate_path: /tmp/fullchain.pem
         privatekey_path: /tmp/privkey.pem
         passphrase: "{{ pfx_password }}"
@@ -84,13 +84,13 @@
 
     - name: Copy PFX to Windows host
       ansible.windows.win_copy:
-        src: /tmp/demo.sdunne.net.pfx
-        dest: 'C:\certs\demo.sdunne.net.pfx'
+        src: /tmp/test19.dac.nc.gov.pfx
+        dest: 'C:\certs\test19.dac.nc.gov.pfx'
       when: cert_type == "letsencrypt"
 
     - name: Import certificate
       ansible.windows.win_certificate_store:
-        path: 'C:\certs\demo.sdunne.net.pfx'
+        path: 'C:\certs\test19.dac.nc.gov.pfx'
         password: "{{ pfx_password }}"
         store_location: LocalMachine
         store_name: My
@@ -108,7 +108,7 @@
       loop:
         - /tmp/fullchain.pem
         - /tmp/privkey.pem
-        - /tmp/demo.sdunne.net.pfx
+        - /tmp/test19.dac.nc.gov.pfx
       when: cert_type == "letsencrypt"
       no_log: true
 
