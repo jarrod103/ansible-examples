@@ -17,6 +17,16 @@
     chrome_remove_updater: true
     chrome_remove_policies: false
 
+    chrome_program_dirs:
+      - 'C:\Program Files\Google\Chrome'
+      - 'C:\Program Files (x86)\Google\Chrome'
+      - 'C:\ProgramData\Google\Chrome'
+    chrome_updater_dirs:
+      - 'C:\Program Files\Google\Update'
+      - 'C:\Program Files (x86)\Google\Update'
+      - 'C:\Program Files\Google\GoogleUpdater'
+      - 'C:\Program Files (x86)\Google\GoogleUpdater'
+
     # HKLM-relative, resolved against the explicit 64-bit registry view (see the removal task).
     chrome_registry_keys:
       - 'SOFTWARE\Google\Chrome'
@@ -32,33 +42,16 @@
         'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*',
         'Registry::HKEY_USERS\*\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*'
       )
-      $entries = foreach ($path in $paths) {
-        Get-ItemProperty -Path $path -ErrorAction SilentlyContinue |
-          Where-Object { $_.DisplayName -like 'Google Chrome*' } |
-          ForEach-Object {
-            $uninstall = [string]$_.UninstallString
-            $isMsi = $uninstall -match 'msiexec'
-            $exe = ''
-            $arguments = ''
-            if (-not $isMsi -and $uninstall) {
-              if ($uninstall -match '^\s*"([^"]+)"\s*(.*)$') {
-                $exe = $Matches[1]
-                $arguments = $Matches[2].Trim()
-              } else {
-                $exe = $uninstall.Trim()
-              }
-            }
-            @{
-              display_name     = [string]$_.DisplayName
-              version          = [string]$_.DisplayVersion
-              key              = [string]$_.PSChildName
-              uninstall_string = $uninstall
-              exe              = $exe
-              arguments        = $arguments
-              is_msi           = [bool]$isMsi
-            }
+      $entries = Get-ItemProperty -Path $paths -ErrorAction SilentlyContinue |
+        Where-Object { $_.DisplayName -like 'Google Chrome*' } |
+        ForEach-Object {
+          @{
+            display_name = [string]$_.DisplayName
+            version      = [string]$_.DisplayVersion
+            key          = [string]$_.PSChildName
+            is_msi       = [bool]($_.UninstallString -match 'msiexec')
           }
-      }
+        }
       $Ansible.Changed = $false
       $Ansible.Result = @{ entries = @($entries) }
 
@@ -89,27 +82,24 @@
           }
       when: chrome_found.result.entries | length > 0
 
-    - name: Uninstall Chrome (MSI installs)
+    # `path` is deliberately omitted: for state=absent with product_id set, win_package reads
+    # QuietUninstallString/UninstallString from the registry itself and *appends* `arguments`.
+    # Chrome's uninstall string already reads "...\setup.exe" --uninstall --system-level
+    # --verbose-logging, so only --force-uninstall has to be added to make it non-interactive -
+    # passing the full flag set here would duplicate it. A real MSI ProductCode routes to
+    # win_package's msi provider instead, which builds its own silent msiexec line and would
+    # choke on Chrome's flags, hence the omit.
+    - name: Uninstall Chrome
       ansible.windows.win_package:
         product_id: "{{ item.key }}"
-        state: absent
-      loop: "{{ chrome_found.result.entries | selectattr('is_msi') | list }}"
-      loop_control:
-        label: "{{ item.display_name }} {{ item.version }}"
-      register: chrome_msi_removed
-
-    - name: Uninstall Chrome (EXE installs)
-      ansible.windows.win_package:
-        path: "{{ item.exe }}"
-        product_id: "{{ item.key }}"
-        arguments: --uninstall --system-level --force-uninstall
+        arguments: "{{ omit if item.is_msi else '--force-uninstall' }}"
         state: absent
         # Chrome's setup.exe uses installer-specific codes; 19 is "uninstall successful".
         expected_return_code: [0, 19, 3010]
-      loop: "{{ chrome_found.result.entries | rejectattr('is_msi') | list }}"
+      loop: "{{ chrome_found.result.entries }}"
       loop_control:
         label: "{{ item.display_name }} {{ item.version }}"
-      register: chrome_exe_removed
+      register: chrome_removed
 
     - name: Find Google updater services
       ansible.windows.win_powershell:
@@ -140,25 +130,11 @@
           }
       when: chrome_remove_updater
 
-    - name: Remove Chrome program directories
+    - name: Remove Chrome and updater directories
       ansible.windows.win_file:
         path: "{{ item }}"
         state: absent
-      loop:
-        - 'C:\Program Files\Google\Chrome'
-        - 'C:\Program Files (x86)\Google\Chrome'
-        - 'C:\ProgramData\Google\Chrome'
-
-    - name: Remove Google updater directories
-      ansible.windows.win_file:
-        path: "{{ item }}"
-        state: absent
-      loop:
-        - 'C:\Program Files\Google\Update'
-        - 'C:\Program Files (x86)\Google\Update'
-        - 'C:\Program Files\Google\GoogleUpdater'
-        - 'C:\Program Files (x86)\Google\GoogleUpdater'
-      when: chrome_remove_updater
+      loop: "{{ chrome_program_dirs + (chrome_updater_dirs if chrome_remove_updater else []) }}"
 
     - name: Find per-user Chrome data directories
       ansible.windows.win_powershell:
@@ -230,10 +206,8 @@
     - name: Reboot if necessary
       ansible.windows.win_reboot:
       when: >-
-        ((chrome_msi_removed.results | default([])) + (chrome_exe_removed.results | default([])))
-        | selectattr('reboot_required', 'defined')
-        | selectattr('reboot_required')
-        | list | length > 0
+        chrome_removed.results | map(attribute='reboot_required', default=false)
+        | select | list | length > 0
 
     - name: Verify Chrome is gone
       ansible.windows.win_powershell:

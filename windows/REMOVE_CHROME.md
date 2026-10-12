@@ -29,6 +29,8 @@ ansible-navigator run -m stdout remove_chrome.yml -e _hosts=windows --check
 | `chrome_remove_user_data` | `true` | Delete `AppData\Local\Google` under every profile in `C:\Users`. **Irreversible** — bookmarks, saved passwords, extensions. |
 | `chrome_remove_updater` | `true` | Remove `Google*` / `gupdate*` services, `Google*` scheduled tasks, and the updater directories. Prevents Chrome silently reinstalling itself. |
 | `chrome_remove_policies` | `false` | Also delete `SOFTWARE\Policies\Google\Chrome`. Off by default — these are normally GPO-managed and will simply return on the next policy refresh. |
+| `chrome_program_dirs` | *(list)* | Chrome directories to delete. |
+| `chrome_updater_dirs` | *(list)* | Updater directories, appended only when `chrome_remove_updater` is true. |
 | `chrome_registry_keys` | *(list)* | HKLM-relative Chrome keys to remove. |
 | `chrome_policy_keys` | *(list)* | HKLM-relative policy keys, used only when `chrome_remove_policies` is true. |
 
@@ -40,12 +42,12 @@ the playbook discovers the install at run time:
 
 1. **Find Chrome uninstall entries** — enumerates the HKLM uninstall hives (64-bit and
    `WOW6432Node`) plus `HKEY_USERS\*` for per-user installs, filtering `DisplayName -like
-   'Google Chrome*'`. Splits `UninstallString` into executable + arguments and flags `is_msi`.
+   'Google Chrome*'`. Returns `display_name`, `version`, `key` and `is_msi` per entry.
 2. **Stop Chrome and updater processes** — Chrome's uninstaller fails or hangs if the browser
    is still running.
-3. **Uninstall** — the discovered entries are split with `selectattr`/`rejectattr` into two
-   `ansible.windows.win_package` tasks, one for MSI (`product_id`) and one for EXE
-   (`path` + `--uninstall --system-level --force-uninstall`).
+3. **Uninstall** — a single `ansible.windows.win_package` task over the discovered entries,
+   passing only `product_id` and letting the module find the uninstall command itself (see
+   [below](#win_package-is-called-without-a-path)).
 4. **Clean up** — updater services and scheduled tasks, program directories, per-user data, and
    registry keys. Each destructive step discovers its targets first and then deletes with a real
    module (`win_service`, `win_file`) rather than a shell one-liner.
@@ -104,11 +106,37 @@ That message is expected and not an error.
 `expected_return_code` is `[0, 19, 3010]` — Chrome uses installer-specific codes and `19` means
 "uninstall successful". If you hit a different non-zero code, read it before widening the list.
 
+### `win_package` is called without a `path`
+
+For `state: absent` with `product_id` set, `path` is not required. `win_package` reads
+`QuietUninstallString` (preferred) or `UninstallString` out of the registry itself and then
+**appends** whatever you pass as `arguments`.
+
+That is why the task passes only `--force-uninstall` rather than the full flag set — Chrome's
+own uninstall string already reads:
+
+```
+"C:\Program Files\Google\Chrome\Application\<version>\Installer\setup.exe" --uninstall --system-level --verbose-logging
+```
+
+so `--uninstall --system-level` would simply be duplicated. `--force-uninstall` is the flag that
+makes it non-interactive.
+
+MSI entries get `omit` instead. A real MSI ProductCode routes to `win_package`'s `msi` provider,
+which builds its own silent `msiexec /x <id> /qn /norestart` line and would choke on Chrome's
+flags. This is why discovery still records `is_msi`.
+
+Do not "fix" this by adding `path` back — it is deliberate, and it is what removes the need to
+parse `UninstallString` into an executable and arguments.
+
 ### `product_id` for EXE installs is not a GUID
 
 For the EXE install the uninstall registry key is literally named `Google Chrome`, and that is
-what gets passed as `product_id`. `win_package` uses it to check installed state, so it works —
-it just does not look like the GUID you would expect from an MSI.
+what gets passed as `product_id`. With no `path`, provider auto-selection walks
+`msi → msix → msp → registry`; `MsiQueryProductStateW` returns `INVALIDARG` for a non-GUID
+rather than throwing, so a name like `Google Chrome` falls through safely to the registry
+provider, which searches `HKLM`/`HKCU` × `SOFTWARE`/`SOFTWARE\Wow6432Node` for a matching
+uninstall key.
 
 ### Per-user installs in unloaded hives
 
@@ -152,7 +180,7 @@ TASK [Assert Chrome is removed]
 "msg": "Google Chrome is not installed"
 
 PLAY RECAP
-<host> : ok=12  changed=0  unreachable=0  failed=0  skipped=6
+<host> : ok=11  changed=0  unreachable=0  failed=0  skipped=5
 ```
 
 To confirm independently on the target:
