@@ -1,0 +1,254 @@
+---
+# Remove Google Chrome from Windows hosts.
+#
+# Chrome ships as an enterprise MSI, a standalone EXE, or a Chocolatey package, and the MSI
+# product GUID changes with every release - so a hardcoded product_id goes stale immediately.
+# This playbook instead discovers the install from the registry at run time and hands what it
+# finds to ansible.windows.win_package, which covers all three install paths.
+#
+# Note: the HKEY_USERS sweep only sees profiles whose hive is currently loaded, so a per-user
+# Chrome belonging to a logged-off account will not appear in the uninstall list. The
+# chrome_remove_user_data sweep deletes its files regardless.
+
+- name: Remove Google Chrome
+  hosts: "{{ _hosts }}"
+  vars:
+    chrome_remove_user_data: true
+    chrome_remove_updater: true
+    chrome_remove_policies: false
+
+    # HKLM-relative, resolved against the explicit 64-bit registry view (see the removal task).
+    chrome_registry_keys:
+      - 'SOFTWARE\Google\Chrome'
+      - 'SOFTWARE\WOW6432Node\Google\Chrome'
+    chrome_policy_keys:
+      - 'SOFTWARE\Policies\Google\Chrome'
+      - 'SOFTWARE\WOW6432Node\Policies\Google\Chrome'
+
+    # Shared discovery script - used by both the find and the verify tasks.
+    chrome_find_script: |
+      $paths = @(
+        'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*',
+        'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*',
+        'Registry::HKEY_USERS\*\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*'
+      )
+      $entries = foreach ($path in $paths) {
+        Get-ItemProperty -Path $path -ErrorAction SilentlyContinue |
+          Where-Object { $_.DisplayName -like 'Google Chrome*' } |
+          ForEach-Object {
+            $uninstall = [string]$_.UninstallString
+            $isMsi = $uninstall -match 'msiexec'
+            $exe = ''
+            $arguments = ''
+            if (-not $isMsi -and $uninstall) {
+              if ($uninstall -match '^\s*"([^"]+)"\s*(.*)$') {
+                $exe = $Matches[1]
+                $arguments = $Matches[2].Trim()
+              } else {
+                $exe = $uninstall.Trim()
+              }
+            }
+            @{
+              display_name     = [string]$_.DisplayName
+              version          = [string]$_.DisplayVersion
+              key              = [string]$_.PSChildName
+              uninstall_string = $uninstall
+              exe              = $exe
+              arguments        = $arguments
+              is_msi           = [bool]$isMsi
+            }
+          }
+      }
+      $Ansible.Changed = $false
+      $Ansible.Result = @{ entries = @($entries) }
+
+  tasks:
+    - name: Find Chrome uninstall entries
+      ansible.windows.win_powershell:
+        script: "{{ chrome_find_script }}"
+      register: chrome_found
+      check_mode: false
+
+    - name: Show installed Chrome versions
+      ansible.builtin.debug:
+        msg: "{{ chrome_found.result.entries | map(attribute='display_name') | list | default(['none'], true) }}"
+
+    - name: Stop Chrome and updater processes
+      ansible.windows.win_powershell:
+        script: |
+          $names = @(
+            'chrome', 'GoogleUpdate', 'GoogleUpdater',
+            'GoogleCrashHandler', 'GoogleCrashHandler64', 'elevation_service'
+          )
+          $procs = Get-Process -Name $names -ErrorAction SilentlyContinue
+          if ($procs) {
+            $procs | Stop-Process -Force -ErrorAction SilentlyContinue
+            Start-Sleep -Seconds 2
+          } else {
+            $Ansible.Changed = $false
+          }
+      when: chrome_found.result.entries | length > 0
+
+    - name: Uninstall Chrome (MSI installs)
+      ansible.windows.win_package:
+        product_id: "{{ item.key }}"
+        state: absent
+      loop: "{{ chrome_found.result.entries | selectattr('is_msi') | list }}"
+      loop_control:
+        label: "{{ item.display_name }} {{ item.version }}"
+      register: chrome_msi_removed
+
+    - name: Uninstall Chrome (EXE installs)
+      ansible.windows.win_package:
+        path: "{{ item.exe }}"
+        product_id: "{{ item.key }}"
+        arguments: --uninstall --system-level --force-uninstall
+        state: absent
+        # Chrome's setup.exe uses installer-specific codes; 19 is "uninstall successful".
+        expected_return_code: [0, 19, 3010]
+      loop: "{{ chrome_found.result.entries | rejectattr('is_msi') | list }}"
+      loop_control:
+        label: "{{ item.display_name }} {{ item.version }}"
+      register: chrome_exe_removed
+
+    - name: Find Google updater services
+      ansible.windows.win_powershell:
+        script: |
+          $svcs = Get-Service -Name 'Google*', 'gupdate*' -ErrorAction SilentlyContinue
+          $Ansible.Changed = $false
+          $Ansible.Result = @{ names = @($svcs | Select-Object -ExpandProperty Name) }
+      register: chrome_services
+      check_mode: false
+      when: chrome_remove_updater
+
+    - name: Remove Google updater services
+      ansible.windows.win_service:
+        name: "{{ item }}"
+        state: absent
+      loop: "{{ chrome_services.result.names | default([]) }}"
+      when: chrome_remove_updater
+
+    - name: Remove Google scheduled tasks
+      ansible.windows.win_powershell:
+        script: |
+          $tasks = Get-ScheduledTask -ErrorAction SilentlyContinue |
+            Where-Object { $_.TaskName -like 'Google*' }
+          if ($tasks) {
+            $tasks | Unregister-ScheduledTask -Confirm:$false
+          } else {
+            $Ansible.Changed = $false
+          }
+      when: chrome_remove_updater
+
+    - name: Remove Chrome program directories
+      ansible.windows.win_file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - 'C:\Program Files\Google\Chrome'
+        - 'C:\Program Files (x86)\Google\Chrome'
+        - 'C:\ProgramData\Google\Chrome'
+
+    - name: Remove Google updater directories
+      ansible.windows.win_file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - 'C:\Program Files\Google\Update'
+        - 'C:\Program Files (x86)\Google\Update'
+        - 'C:\Program Files\Google\GoogleUpdater'
+        - 'C:\Program Files (x86)\Google\GoogleUpdater'
+      when: chrome_remove_updater
+
+    - name: Find per-user Chrome data directories
+      ansible.windows.win_powershell:
+        script: |
+          $dirs = Get-ChildItem -Path 'C:\Users' -Directory -ErrorAction SilentlyContinue |
+            ForEach-Object { Join-Path $_.FullName 'AppData\Local\Google' } |
+            Where-Object { Test-Path -LiteralPath $_ }
+          $Ansible.Changed = $false
+          $Ansible.Result = @{ paths = @($dirs) }
+      register: chrome_user_data
+      check_mode: false
+      when: chrome_remove_user_data
+
+    - name: Remove per-user Chrome data directories
+      ansible.windows.win_file:
+        path: "{{ item }}"
+        state: absent
+      loop: "{{ chrome_user_data.result.paths | default([]) }}"
+      when: chrome_remove_user_data
+
+    # Two reasons this is win_powershell rather than win_regedit:
+    #
+    # 1. win_regedit (and Remove-Item) resolve the parent SOFTWARE\Google through the
+    #    WOW64-redirected view, where Chrome does not exist - that view holds only
+    #    Google\Update - so they report "Cannot delete a subkey tree because the subkey does
+    #    not exist" for a key that is plainly present in the 64-bit view. Via Remove-Item the
+    #    error is non-terminating, so the task reports changed while deleting nothing.
+    #    Opening the Registry64 base key explicitly addresses the real key and makes the
+    #    WOW6432Node paths literal rather than redirected.
+    #
+    # 2. Windows plants Microsoft-owned native messaging host registrations under
+    #    SOFTWARE\Google\Chrome\NativeMessagingHosts (Windows Security BrowserCore and
+    #    Defender). Those are protected - even "reg delete /f" returns "Delete request is
+    #    partially completed" - and Defender recreates them anyway. So removal is best-effort:
+    #    anything that cannot be deleted is reported instead of failing the play.
+    - name: Remove Chrome registry keys
+      ansible.windows.win_powershell:
+        parameters:
+          Paths: "{{ chrome_registry_keys + (chrome_policy_keys if chrome_remove_policies else []) }}"
+        script: |
+          param([String[]]$Paths)
+          $base = [Microsoft.Win32.RegistryKey]::OpenBaseKey('LocalMachine', 'Registry64')
+          $removed = @()
+          $retained = @()
+          foreach ($path in $Paths) {
+            $key = $base.OpenSubKey($path)
+            if (-not $key) { continue }
+            $key.Close()
+            try {
+              $base.DeleteSubKeyTree($path, $false)
+              $removed += $path
+            } catch {
+              $retained += $path
+            }
+          }
+          if (-not $removed) {
+            $Ansible.Changed = $false
+          }
+          $Ansible.Result = @{ removed = @($removed); retained = @($retained) }
+      register: chrome_reg_removed
+
+    - name: Report registry keys left in place
+      ansible.builtin.debug:
+        msg: >-
+          Protected keys retained (owned by Windows, not Chrome):
+          {{ chrome_reg_removed.result.retained | join(', ') }}
+      when: chrome_reg_removed.result.retained | default([]) | length > 0
+
+    - name: Reboot if necessary
+      ansible.windows.win_reboot:
+      when: >-
+        ((chrome_msi_removed.results | default([])) + (chrome_exe_removed.results | default([])))
+        | selectattr('reboot_required', 'defined')
+        | selectattr('reboot_required')
+        | list | length > 0
+
+    - name: Verify Chrome is gone
+      ansible.windows.win_powershell:
+        script: "{{ chrome_find_script }}"
+      register: chrome_verify
+      check_mode: false
+
+    - name: Assert Chrome is removed
+      ansible.builtin.assert:
+        that:
+          - chrome_verify.result.entries | length == 0
+        success_msg: "Google Chrome is not installed"
+        fail_msg: >-
+          Google Chrome is still installed:
+          {{ chrome_verify.result.entries | map(attribute='display_name') | join(', ') }}
+      when: not ansible_check_mode
+
+...
