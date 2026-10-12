@@ -1,5 +1,5 @@
 [windows]
-ec2-3-145-25-138.us-east-2.compute.amazonaws.com
+ec2-3-19-60-0.us-east-2.compute.amazonaws.com
 
 [windows:vars]
 ansible_connection = winrm
@@ -7,6 +7,6 @@ ansible_winrm_transport = ntlm
 ansible_winrm_server_cert_validation = ignore
 ansible_port = 5986
 ansible_user = ec2-user
-ansible_password = 'MjczMTg1_1'
+ansible_password = 'DJbi:mq4WDFmhRsZ_1'
 
 
