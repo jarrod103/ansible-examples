@@ -1,0 +1,44 @@
+---
+# ansible-builder v3 schema. Build with:
+#   ansible-builder build -f execution-environment.yml -t ee-demo:0.0.2 -v3
+version: 3
+
+images:
+  base_image:
+    # Pinned immutable build of the AAP 2.7 minimal EE (ansible-core 2.20 stream).
+    # Swap to a 2.16-* tag if you need to match an older controller.
+    # List options: skopeo list-tags docker://registry.redhat.io/ansible-automation-platform-27/ee-minimal-rhel9
+    name: registry.redhat.io/ansible-automation-platform-27/ee-minimal-rhel9:2.20-1789578939
+
+dependencies:
+  # ansible-core and ansible-runner are already present in ee-minimal, so they are
+  # deliberately not re-declared here -- doing so forces a redundant pip install.
+
+  # Pin the interpreter explicitly. redhat.rhel_system_roles declares `dnf` in its
+  # bindep.txt; on RHEL 9 that drags in the python3.9 RPM, which owns /usr/bin/python3
+  # and clobbers ee-minimal's alternatives symlink to python3.12. The default
+  # PYCMD=/usr/bin/python3 would then resolve to 3.9, which has no pip, and the final
+  # stage's `pip install dumb-init` fails. Pointing at python3.12 directly is immune
+  # to that. (ansible's own shebangs are already hardcoded to python3.12.)
+  python_interpreter:
+    python_path: /usr/bin/python3.12
+
+  galaxy: requirements.yml
+  python: requirements.txt
+  system: bindep.txt
+
+additional_build_files:
+  # Carries the Automation Hub credential into the build context.
+  - src: ansible.cfg
+    dest: configs
+
+additional_build_steps:
+  prepend_galaxy:
+    # The `galaxy` stage is throwaway -- `final` only does
+    # `COPY --from=galaxy /usr/share/ansible`, so the token never reaches the
+    # shipped image. See README.md for the commands that verify this.
+    - COPY _build/configs/ansible.cfg /etc/ansible/ansible.cfg
+
+options:
+  # ee-minimal ships microdnf, not dnf.
+  package_manager_path: /usr/bin/microdnf

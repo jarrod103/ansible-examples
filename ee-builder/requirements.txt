@@ -1,0 +1,7 @@
+# Python deps for the EE, standard pip requirements format.
+# Pin versions here -- unpinned entries make builds non-reproducible.
+# Example:
+#   netaddr==1.3.0
+crowdstrike-falconpy==1.6.6
+aiohttp
+

@@ -1,0 +1,8 @@
+---
+# Galaxy content baked into the image.
+collections:
+  - name: community.general
+  - name: ansible.posix
+  # Certified content from Red Hat Automation Hub -- requires the authenticated
+  # galaxy server configured in ansible.cfg.
+  #  - name: redhat.rhel_system_roles

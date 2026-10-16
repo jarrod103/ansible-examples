@@ -1,0 +1,4 @@
+# System packages, bindep format: <package> [platform:rpm]
+# Installed with microdnf during the build.
+# Example:
+#   git-core [platform:rpm]
