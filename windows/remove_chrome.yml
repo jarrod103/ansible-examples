@@ -35,6 +35,10 @@
       - 'SOFTWARE\Policies\Google\Chrome'
       - 'SOFTWARE\WOW6432Node\Policies\Google\Chrome'
 
+    # Restarting Explorer clears the stale Chrome taskbar pin for signed-in users right away.
+    # Disruptive (taskbars flicker, open File Explorer windows close), so off by default.
+    chrome_restart_explorer: true
+
     # Shared discovery script - used by both the find and the verify tasks.
     chrome_find_script: |
       $paths = @(
@@ -185,6 +189,14 @@
         state: absent
       loop: "{{ chrome_user_data.result.paths | default([]) }}"
       when: chrome_remove_user_data
+
+    - name: Restart Explorer to clear stale taskbar pins
+      ansible.windows.win_powershell:
+        script: |
+          $procs = @(Get-Process -Name explorer -ErrorAction SilentlyContinue)
+          $procs | Stop-Process -Force
+          $Ansible.Changed = $procs.Count -gt 0
+      when: chrome_restart_explorer
 
     # Two reasons this is win_powershell rather than win_regedit:
     #
